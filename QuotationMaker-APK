@@ -1,0 +1,293 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project
+        run: |
+          set -e
+          mkdir -p app/src/main/assets/lib app/src/main/res/drawable app/src/main/java/com/subhvinayak/quotation
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'QuotationMaker'
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.subhvinayak.quotation'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.subhvinayak.quotation'
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Quotation Maker"
+                  android:icon="@drawable/ic_launcher"
+                  android:allowBackup="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#1565C0" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M32,26h34l12,12v44h-46z"/>
+              <path android:fillColor="#1565C0" android:pathData="M40,50h30v4h-30z M40,60h30v4h-30z M40,70h22v4h-22z"/>
+          </vector>
+          EOF
+          cat > app/src/main/java/com/subhvinayak/quotation/MainActivity.java <<'EOF'
+          package com.subhvinayak.quotation;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.util.Base64;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.JsResult;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.widget.Toast;
+          import java.io.OutputStream;
+
+          public class MainActivity extends Activity {
+              private WebView wv;
+              private ValueCallback<Uri[]> fileCb;
+
+              public class Bridge {
+                  @JavascriptInterface
+                  public void savePdf(String b64, String name) {
+                      try {
+                          byte[] data = Base64.decode(b64, Base64.DEFAULT);
+                          ContentValues v = new ContentValues();
+                          v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                          v.put(MediaStore.Downloads.MIME_TYPE, "application/pdf");
+                          v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                          final Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                          OutputStream o = getContentResolver().openOutputStream(u);
+                          o.write(data);
+                          o.close();
+                          runOnUiThread(() -> {
+                              Toast.makeText(MainActivity.this, "PDF Downloads mein save ho gayi", Toast.LENGTH_LONG).show();
+                              try {
+                                  Intent i = new Intent(Intent.ACTION_VIEW);
+                                  i.setDataAndType(u, "application/pdf");
+                                  i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                                  startActivity(i);
+                              } catch (Exception ignored) { }
+                          });
+                      } catch (final Exception e) {
+                          runOnUiThread(() -> Toast.makeText(MainActivity.this, "PDF save nahi hui: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                      }
+                  }
+              }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  wv = new WebView(this);
+                  setContentView(wv);
+                  WebSettings s = wv.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(true);
+                  wv.addJavascriptInterface(new Bridge(), "Android");
+                  wv.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (fileCb != null) fileCb.onReceiveValue(null);
+                          fileCb = cb;
+                          try {
+                              startActivityForResult(p.createIntent(), 1);
+                          } catch (Exception e) {
+                              fileCb = null;
+                              return false;
+                          }
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsConfirm(WebView w, String url, String msg, final JsResult r) {
+                          new AlertDialog.Builder(MainActivity.this).setMessage(msg)
+                              .setPositiveButton("OK", (d, i) -> r.confirm())
+                              .setNegativeButton("Cancel", (d, i) -> r.cancel())
+                              .setOnCancelListener(d -> r.cancel()).show();
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsAlert(WebView w, String url, String msg, final JsResult r) {
+                          new AlertDialog.Builder(MainActivity.this).setMessage(msg)
+                              .setPositiveButton("OK", (d, i) -> r.confirm())
+                              .setOnCancelListener(d -> r.confirm()).show();
+                          return true;
+                      }
+                  });
+                  wv.loadUrl("file:///android_asset/index.html");
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req == 1 && fileCb != null) {
+                      fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
+                      fileCb = null;
+                  }
+              }
+          }
+          EOF
+          cat > app/src/main/assets/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="hi"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+          <title>Quotation Maker</title>
+          <style>
+          :root{--bg:#e9ecef;--bar:#fff;--tx:#111;--bd:#cfd4da;--ac:#1565c0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px)}
+          @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1c1f23;--bar:#2a2e33;--tx:#eee;--bd:#444;--ac:#64a8ff}}
+          :root[data-theme="dark"]{--bg:#1c1f23;--bar:#2a2e33;--tx:#eee;--bd:#444;--ac:#64a8ff}
+          html{color-scheme:light dark}
+          body{margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,sans-serif;padding-bottom:calc(76px + env(safe-area-inset-bottom,0px))}
+          .hint{font-size:13px;padding:8px 12px;opacity:.8}
+          #stage{margin:0 auto 8px;overflow:visible}
+          #sheet{width:794px;min-height:1123px;background:#fff;color:#000;border:3px solid #000;font:13px Arial,Helvetica,sans-serif;box-sizing:border-box;display:flex;flex-direction:column;transform-origin:0 0}
+          .e{outline:none;min-height:16px;word-break:break-word}.e:focus{background:#fff9c4}
+          table{border-collapse:collapse;width:100%}td,th{border:1px solid #000;padding:2px 5px}
+          .hd{background:#ff0;display:flex;align-items:center;justify-content:space-between;padding:6px 8px;text-align:center}
+          .ht{flex:1;padding:0 8px}.cn{font-size:25px;color:#1ea0d8;font-weight:400}.b{font-weight:700}
+          .logo{width:105px;height:105px;border-radius:50%;border:5px solid #4a8f3a;background:#fff center/cover no-repeat;display:flex;align-items:center;justify-content:center;font-size:46px;cursor:pointer;flex:none;overflow:hidden}
+          .logo input{display:none}
+          .dl{color:#4a90d9;font-weight:700;font-size:11px;text-align:center;padding:8px 20px;border-bottom:1px solid #000;border-top:1px solid #000}
+          .qt{color:#e00;font-size:30px;font-weight:700;text-align:center;border-bottom:1px solid #000;line-height:1.05}
+          .inf{display:flex}.inf>table.L{width:55%}.inf>.R{width:45%}
+          .lb{color:#e00;font-weight:700;font-size:15px;border:1px solid #000}
+          .pu{color:#5b2c9a;font-weight:700}.rd{color:#e00;font-weight:700}.c{text-align:center}.r{text-align:right}
+          .ph{font-size:16px;padding:22px 4px;border-left:1px solid #000}
+          #hdr th{background:#ffc000;color:#e00;font-weight:700;font-size:15px}
+          .it td{height:24px;color:#0070c0;font-weight:700}.it td:nth-child(1){text-align:center}
+          .ft{display:flex;border-top:1px solid #000;margin-top:auto;min-height:190px}
+          .tc{width:215px;border-right:1px solid #000;font-weight:700;font-size:12.5px;padding:2px 4px}.th{font-size:17px}
+          .bk{width:200px;border-right:1px solid #000;font-weight:700;font-size:12.5px;padding:2px 4px}
+          .tt{flex:1;border:0}.tt td{height:25px;font-weight:700;font-size:15px}.tt td:nth-child(2){text-align:right;width:130px}
+          #bal{background:#00b0f0;color:#c00}
+          #bar{position:fixed;left:0;right:0;bottom:0;background:var(--bar);border-top:1px solid var(--bd);display:flex;gap:8px;padding:10px 10px calc(10px + env(safe-area-inset-bottom,0px))}
+          #bar button{flex:1;padding:13px 4px;font-size:15px;border-radius:10px;border:1px solid var(--bd);background:transparent;color:var(--tx);font-weight:600}
+          #bar #pdf{flex:2;background:var(--ac);color:#fff;border-color:var(--ac)}
+          </style></head><body>
+          <div class="hint">Kisi bhi text par tap karke edit karein. Logo par tap karke apna logo lagayein. Niche "PDF" dabayein.</div>
+          <div id="stage"><div id="sheet">
+          <div class="hd"><label class="logo">🕉️<input type="file" accept="image/*"></label>
+          <div class="ht"><div class="e cn">SUBH VINAYAK ENTERPRISES</div><div class="e">Vijay complex, Main Road, Banderdewa, Lakhimpur (Assam)</div><div class="e b">GST NO – 18AZJPT3481G2ZV</div></div>
+          <label class="logo">🕉️<input type="file" accept="image/*"></label></div>
+          <div class="e dl">DEALS IN: - Honda Generator, Rice Mill, Honda Brush Cutter, Still Chain Saw, Bosch Chop Saw, Welding Machine, Car Wash, Glass, Ply Board, Aluminum Section, Hollow bricks machine, C.L.C Plants, Paver &amp; Concrete Bricks, ACC Bricks Machine, Mobile Crusher Machine, Bitumen, Bitumen all in one, All Type of Machine &amp; Power tools With Hardware Goods Sold Here</div>
+          <div class="e qt">QUOTATION</div>
+          <div class="inf"><table class="L"><tr><td class="e lb" style="width:62px;height:100px;vertical-align:top">TO</td><td class="e pu" id="to" style="vertical-align:top">BAJA YUKPO</td></tr><tr><td class="e lb">GSTIN</td><td class="e c pu">9436042603</td></tr><tr><td class="e lb">PHONE</td><td class="e"></td></tr></table>
+          <div class="R"><table><tr><td class="e lb">QT.NO</td><td class="e c rd">SVE/26-27</td><td class="e c b" id="qn">67</td></tr><tr><td class="e lb">DATE:</td><td class="e c b" colspan="2" id="dt"></td></tr><tr><td class="e lb">REF No. (BY)</td><td class="e c b" colspan="2">AJAY TIWARI</td></tr></table>
+          <div class="e c pu ph">PH NO-8011324351,8471937303</div></div></div>
+          <table><thead><tr id="hdr"><th class="e" style="width:52px">SR. NO</th><th class="e">PARTICULAR</th><th class="e" style="width:76px">UQM.</th><th class="e" style="width:62px">QTY.</th><th class="e" style="width:112px">RATE</th><th class="e" style="width:130px">AMOUNT</th></tr></thead><tbody id="items"></tbody></table>
+          <div class="ft"><div class="tc"><div class="e th">Terms &amp; Conditions</div><div class="e">1. All amounts are inclusive gst.<br>2. Transport charge is extra.<br>3. 100% payment in advance with PO.<br>4. Quotation is valid for 30 days only.<br>5. Delivery will be done within 25 days after receiving full payment.</div></div>
+          <div class="bk e">OUR BANK DETAIL:<br>NAME :- PUNJAB NATIONAL BANK<br>A/C NO:<span style="color:#c00">1858209300000024</span><br>Branch:- BANDERDEWA<br>IFSC :-PUNBO185820</div>
+          <table class="tt"><tr><td class="e c">TOTAL</td><td id="tot"></td></tr><tr><td></td><td></td></tr><tr><td class="e c" style="color:#1565c0;font-style:italic;text-decoration:underline">ADV. IN A/C</td><td class="e r" id="adv">₹ 10,000.00</td></tr><tr><td class="e c">ROUND OFF</td><td class="e r" id="rnd"></td></tr><tr><td class="e c" style="color:#e00">BALANCE</td><td id="bal"></td></tr></table></div>
+          </div></div>
+          <div id="bar"><button id="add">+ Row</button><button id="del">− Row</button><button id="rst">Naya</button><button id="pdf">PDF Download</button></div>
+          <script src="lib/html2canvas.min.js"></script>
+          <script src="lib/jspdf.umd.min.js"></script>
+          <script>
+          const $=s=>document.querySelector(s),sh=$('#sheet'),st=$('#stage'),K='qt_maker_v1';
+          const N=v=>parseFloat(String(v).replace(/[^0-9.\-]/g,''));
+          const F=n=>'₹ '+n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+          const row=()=>'<tr class="it"><td></td><td class="e"></td><td class="e c"></td><td class="e c"></td><td class="e r"></td><td class="e r"></td></tr>';
+          const store=(f)=>{try{return f()}catch(e){return null}};
+          function edit(){sh.querySelectorAll('.e').forEach(x=>x.contentEditable='true')}
+          function calc(){let t=0;const ae=document.activeElement;
+           $('#items').querySelectorAll('tr').forEach((r,i)=>{const c=r.cells;c[0].textContent=c[1].innerText.trim()?i+1:'';
+            const q=N(c[3].innerText),p=N(c[4].innerText);
+            if(!isNaN(q)&&!isNaN(p)&&ae!==c[5])c[5].textContent=F(q*p);
+            const a=N(c[5].innerText);if(!isNaN(a))t+=a});
+           $('#tot').textContent=F(t);
+           const ad=N($('#adv').innerText)||0,rn=N($('#rnd').innerText)||0;
+           $('#bal').textContent=F(t-ad+rn)}
+          let tm;function save(){clearTimeout(tm);tm=setTimeout(()=>store(()=>localStorage.setItem(K,sh.innerHTML)),400)}
+          function fit(){const s=Math.min(1,(innerWidth-12)/794);sh.style.transform='scale('+s+')';st.style.width=794*s+'px';st.style.height=sh.offsetHeight*s+'px'}
+          // initial template
+          $('#items').innerHTML=Array(17).fill(row()).join('');
+          const r0=$('#items').rows[0].cells;r0[1].textContent="CONCREATE CUTTER 14'' XTRA POWER";r0[2].textContent='NOS';r0[3].textContent='1';r0[4].textContent='₹ 25,000.00';
+          $('#dt').textContent=new Date().toLocaleDateString('en-GB').replace(/\//g,'-');
+          const ORIG=sh.innerHTML;
+          const sv=store(()=>localStorage.getItem(K));if(sv)sh.innerHTML=sv;
+          edit();calc();fit();new ResizeObserver(fit).observe(sh);addEventListener('resize',fit);
+          sh.addEventListener('input',()=>{calc();save()});
+          sh.addEventListener('focusout',e=>{const t=e.target;
+           if(t.matches('#items td:nth-child(5),#adv,#rnd')){const n=N(t.innerText);if(!isNaN(n))t.textContent=F(n)}calc();save()});
+          sh.addEventListener('paste',e=>{e.preventDefault();document.execCommand('insertText',false,(e.clipboardData||window.clipboardData).getData('text'))});
+          sh.addEventListener('change',e=>{if(e.target.type!=='file'||!e.target.files[0])return;
+           const fr=new FileReader();fr.onload=()=>{sh.querySelectorAll('.logo').forEach(l=>{l.style.backgroundImage='url('+fr.result+')';l.firstChild.textContent=''});save()};fr.readAsDataURL(e.target.files[0])});
+          $('#add').onclick=()=>{$('#items').insertAdjacentHTML('beforeend',row());edit();calc();save()};
+          $('#del').onclick=()=>{const t=$('#items');if(t.rows.length>1){t.deleteRow(-1);calc();save()}};
+          $('#rst').onclick=()=>{if(confirm('Naya quotation? Purana sab saaf ho jayega.')){store(()=>localStorage.removeItem(K));sh.innerHTML=ORIG;edit();calc()}};
+          $('#pdf').onclick=async()=>{const b=$('#pdf');b.disabled=true;b.textContent='Ban raha hai…';
+           if(document.activeElement)document.activeElement.blur();calc();
+           sh.style.transform='none';st.style.height='auto';
+           try{const cv=await html2canvas(sh,{scale:2,backgroundColor:'#fff',scrollX:0,scrollY:-scrollY,useCORS:true});
+            const d=new window.jspdf.jsPDF('p','mm','a4');let w=210,h=w*cv.height/cv.width;if(h>297){h=297;w=h*cv.width/cv.height}
+            d.addImage(cv.toDataURL('image/jpeg',.95),'JPEG',(210-w)/2,0,w,h);
+            const nm='Quotation_'+($('#qn').innerText.trim()||'x')+'_'+($('#to').innerText.trim().replace(/[^\w]+/g,'_')||'')+'.pdf';
+            if(window.Android)Android.savePdf(d.output('datauristring').split(',')[1],nm);else d.save(nm);
+           }catch(e){if(!e||e.code!=='declined')alert('PDF nahi bani, dobara try karein.')}
+           b.disabled=false;b.textContent='PDF Download';fit()};
+          </script></body></html>
+          EOF
+          cd /tmp && npm pack html2canvas@1.4.1 jspdf@2.5.1 >/dev/null 2>&1
+          mkdir h j && tar xzf html2canvas-1.4.1.tgz -C h && tar xzf jspdf-2.5.1.tgz -C j
+          cd $GITHUB_WORKSPACE
+          cp /tmp/h/package/dist/html2canvas.min.js app/src/main/assets/lib/
+          cp /tmp/j/package/dist/jspdf.umd.min.js app/src/main/assets/lib/
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuotationMaker-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
